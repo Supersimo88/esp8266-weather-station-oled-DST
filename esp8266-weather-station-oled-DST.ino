@@ -25,10 +25,6 @@ See more at http://blog.squix.ch
 
 /* Customizations by Neptune (NeptuneEng on Twitter, Neptune2 on Github)
  *  
- * Version 1.0.0 - Bugfix
- *	- Fixed ticker overwrite bug: Split DHT and Wunderground timed updates out to 2 tickers. Thanks @charonofssi
- *
- * Version 0.1.0 - Initial Released Version
  *  Added Wifi Splash screen and credit to Squix78
  *  Modified progress bar to a thicker and symmetrical shape
  *  Replaced TimeClient with built-in lwip sntp client (no need for external ntp client library)
@@ -58,11 +54,12 @@ See more at http://blog.squix.ch
 #include <ESP8266WebServer.h>
 #include <WiFiManager.h>
 
-// #include "SSD1306Wire.h"
+#include "SSD1306.h"
+//#include "SSD1306Wire.h"
 // #include <SPI.h> // Only needed for Arduino 1.6.5 and earlier
-#include "SSD1306Spi.h"
+//#include "SSD1306Spi.h"
 #include "OLEDDisplayUi.h"
-// #include "Wire.h"
+#include "Wire.h"
 #include "WundergroundClient.h"
 #include "WeatherStationFonts.h"
 #include "WeatherStationImages.h"
@@ -71,7 +68,7 @@ See more at http://blog.squix.ch
 #include "DHT.h"
 #include "ThingspeakClient.h"
 #include <simpleDSTadjust.h>
-
+#include <PubSubClient.h>
 
 /***************************
  * Begin Settings
@@ -79,32 +76,46 @@ See more at http://blog.squix.ch
 // Please read http://blog.squix.org/weatherstation-getting-code-adapting-it
 // for setup instructions
 
-#define HOSTNAME "ESP8266-OTA-"
+#define HOSTNAME "ESP8266-OTA-WEATHER-"
 
 // Setup
-const int UPDATE_INTERVAL_SECS = 30 + (10 * 60); // Update every 10.5 minutes
+const int UPDATE_INTERVAL_SECS = 10 * 60; // Update every 10 minutes
 
 // Display Settings
 // Pin definitions for SPI OLED
-#define OLED_CS     D8  // Chip select
-#define OLED_DC     D2  // Data/Command
-#define OLED_RESET  D0  // RESET
+//#define OLED_CS     D8  // Chip select
+//#define OLED_DC     D2  // Data/Command
+//#define OLED_RESET  D0  // RESET
+// Pin definitions for i2c
+const int I2C_DISPLAY_ADDRESS = 0x3c;
+//const int SDA_PIN = D3; // NodeMCU
+//const int SDC_PIN = D4; // NodeMCU
+const int SDA_PIN = D2; // Wemos D1 Mini
+const int SDC_PIN = D3; // Wemos D1 Mini
+
+
 
 // DHT Settings
 // #define DHTPIN D2 // NodeMCU
 #define DHTPIN D4 // Wemos D1R2 Mini
-#define DHTTYPE DHT22   // DHT22  (AM2302), AM2321
+#define DHTTYPE 22   // DHT22  (AM2302), AM2321
 char FormattedTemperature[10];
 char FormattedHumidity[10];
 
+//MQTT / HomeKit
+// Update these with values suitable for your network.
+IPAddress MQTTserver(192, 168, 1, 19);
+WiFiClient wclient;
+PubSubClient client(wclient, MQTTserver);
+
 // -----------------------------------
 // Locales (uncomment only 1)
-#define Zurich
+#define Genova
 //#define Boston
 // #define Sydney
 //------------------------------------
 
-#ifdef Zurich
+#ifdef Genova
 //DST rules for Central European Time Zone
 #define UTC_OFFSET +1
 struct dstRule StartRule = {"CEST", Last, Sun, Mar, 2, 3600}; // Central European Summer Time = UTC/GMT +2 hours
@@ -117,20 +128,21 @@ struct dstRule EndRule = {"CET", Last, Sun, Oct, 2, 0};       // Central Europea
 
 // Wunderground Settings
 const boolean IS_METRIC = true;
-const String WUNDERGRROUND_API_KEY = "<WUNDERGROUND KEY HERE>";
-const String WUNDERGRROUND_LANGUAGE = "EN";
-const String WUNDERGROUND_COUNTRY = "CH";
-const String WUNDERGROUND_CITY = "Zurich";
+const String WUNDERGRROUND_API_KEY = "api";
+const String WUNDERGRROUND_LANGUAGE = "IT";
+const String WUNDERGROUND_COUNTRY = "IT";
+const String WUNDERGROUND_CITY = "Genova";
+const String WUNDERGROUND_PWS = "IGENOVA170";
 #endif
 
-#ifdef Boston
+/*#ifdef Boston
 //DST rules for US Eastern Time Zone (New York, Boston)
 #define UTC_OFFSET -5
 struct dstRule StartRule = {"EDT", Second, Sun, Mar, 2, 3600}; // Eastern Daylight time = UTC/GMT -4 hours
 struct dstRule EndRule = {"EST", First, Sun, Nov, 1, 0};       // Eastern Standard time = UTC/GMT -5 hour
 
 // Uncomment for 24 Hour style clock
-//#define STYLE_24HR
+#define STYLE_24HR
 
 #define NTP_SERVERS "us.pool.ntp.org", "time.nist.gov", "pool.ntp.org"
 
@@ -159,7 +171,39 @@ const String WUNDERGRROUND_API_KEY = "<WUNDERGROUND KEY HERE>";
 const String WUNDERGRROUND_LANGUAGE = "EN";
 const String WUNDERGROUND_COUNTRY = "AU";
 const String WUNDERGROUND_CITY = "Sydney";
+#endif*/
+
+#define italiano
+
+#ifdef english
+String str_mon[] = {"Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"};
+String str_wday[] = {"Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"};
 #endif
+
+#ifdef italiano
+String str_mon[] = {"Gen", "Feb", "Marzo", "Apr", "Mag", "Giu", "Lug", "Ago", "Set", "Ott", "Nov", "Dic"};
+String str_wday[] = {"Dom", "lun", "Mar", "Mer", "Gio", "Ven", "Sab"};  // 3 letras
+// String str_wday[] = {"lu", "ma", "mi", "ju", "vi", "sa", "do"}; // 2 letras
+#endif
+
+
+
+void HomeKit(){
+    if (WiFi.status() == WL_CONNECTED) {
+    if (!client.connected()) {
+      if (client.connect("ESPNurseryTemperatureSensor")) {
+        client.publish("HomeKit","Nursery Temperature Sensor Online!");
+      }
+    }
+
+    if (client.connected()){
+      Serial.println("publishing");
+        client.publish("NurseryTemperature",String(FormattedTemperature));   
+        client.loop();
+    }
+      
+  }
+}
 
 //Thingspeak Settings
 const String THINGSPEAK_CHANNEL_ID = "67284";
@@ -167,10 +211,10 @@ const String THINGSPEAK_API_READ_KEY = "L2VIW20QVNZJBLAK";
 
 // Initialize the I2 oled display for address 0x3c
 // sda-pin=14 and sdc-pin=12
-// SSD1306Wire     display(I2C_DISPLAY_ADDRESS, SDA_PIN, SDC_PIN);
+SSD1306Wire display(I2C_DISPLAY_ADDRESS, SDA_PIN, SDC_PIN);
 
 // SPI OLED
-SSD1306Spi display(OLED_RESET, OLED_DC, OLED_CS);
+//SSD1306Spi display(OLED_RESET, OLED_DC, OLED_CS);
 
 OLEDDisplayUi   ui( &display );
 
@@ -200,7 +244,8 @@ bool readyForDHTUpdate = false;
 
 String lastUpdate = "--";
 
-Ticker ticker1, ticker2;
+Ticker ticker;
+Ticker weathertick;
 
 //declaring prototypes
 void configModeCallback (WiFiManager *myWiFiManager);
@@ -222,11 +267,14 @@ int8_t getWifiQuality();
 // Add frames
 // this array keeps function pointers to all frames
 // frames are the single views that slide from right to left
-FrameCallback frames[] = { drawDateTime, drawCurrentWeather, drawIndoor, drawThingspeak, drawForecast, drawForecast2  };
-int numberOfFrames = 6;
+FrameCallback frames[] = { drawDateTime, drawCurrentWeather, drawIndoor, drawForecast  };
+//FrameCallback frames[] = { drawDateTime, drawCurrentWeather, drawIndoor, drawThingspeak, drawForecast, drawForecast2  };
+int numberOfFrames = 4;
 
 OverlayCallback overlays[] = { drawHeaderOverlay };
 int numberOfOverlays = 1;
+
+
 
 void setup() {
     // Turn On VCC
@@ -238,7 +286,7 @@ void setup() {
   display.init();
   display.clear();
   display.display();
-  
+
   display.flipScreenVertically();  // Comment out to flip display 180deg
   display.setFont(ArialMT_Plain_10);
   display.setTextAlignment(TEXT_ALIGN_CENTER);
@@ -246,7 +294,7 @@ void setup() {
 
   // Credit where credit is due
   display.drawXbm(-6, 5, WiFi_Logo_width, WiFi_Logo_height, WiFi_Logo_bits);
-  display.drawString(88, 18, "Weather Station\nBy Squix78\nmods by Neptune");
+  display.drawString(88, 18, "Weather Station\nBy Simone");
   display.display();
 
   //WiFiManager
@@ -257,10 +305,12 @@ void setup() {
   wifiManager.setAPCallback(configModeCallback);
 
   //or use this for auto generated name ESP + ChipID
-  wifiManager.autoConnect();
+ // wifiManager.autoConnect();
 
   //Manual Wifi
-  // WiFi.begin(SSID, PASSWORD);
+  const char* SSID = "ssid"; 
+const char* PASSWORD = "pwd";
+   WiFi.begin(SSID, PASSWORD);
   String hostname(HOSTNAME);
   hostname += String(ESP.getChipId(), HEX);
   WiFi.hostname(hostname);
@@ -271,7 +321,7 @@ void setup() {
     delay(500);
     Serial.print(".");
     display.clear();
-    display.drawString(64, 10, "Connecting to WiFi");
+    display.drawString(64, 10, "Connessione alla WiFi");
     display.drawXbm(46, 30, 8, 8, counter % 3 == 0 ? activeSymbol : inactiveSymbol);
     display.drawXbm(60, 30, 8, 8, counter % 3 == 1 ? activeSymbol : inactiveSymbol);
     display.drawXbm(74, 30, 8, 8, counter % 3 == 2 ? activeSymbol : inactiveSymbol);
@@ -309,8 +359,9 @@ void setup() {
 
   updateData(&display);
 
-  ticker1.attach(UPDATE_INTERVAL_SECS, setReadyForWeatherUpdate);
-  ticker2.attach(60, setReadyForDHTUpdate);
+  //ticker.attach(UPDATE_INTERVAL_SECS, setReadyForWeatherUpdate);
+  ticker.attach(60, setReadyForDHTUpdate);
+  weathertick.attach(UPDATE_INTERVAL_SECS, setReadyForWeatherUpdate);
 }
 
 void loop() {
@@ -331,7 +382,6 @@ void loop() {
     ArduinoOTA.handle();
     delay(remainingTimeBudget);
   }
-
 }
 
 void configModeCallback (WiFiManager *myWiFiManager) {
@@ -368,23 +418,24 @@ void drawOtaProgress(unsigned int progress, unsigned int total) {
 }
 
 void updateData(OLEDDisplay *display) {
-  drawProgress(display, 10, "Updating time...");
+  drawProgress(display, 10, "Aggiornamento data...");
   configTime(UTC_OFFSET * 3600, 0, NTP_SERVERS);
-  drawProgress(display, 30, "Updating conditions...");
-  wunderground.updateConditions(WUNDERGRROUND_API_KEY, WUNDERGRROUND_LANGUAGE, WUNDERGROUND_COUNTRY, WUNDERGROUND_CITY);
-  drawProgress(display, 50, "Updating forecasts...");
-  wunderground.updateForecast(WUNDERGRROUND_API_KEY, WUNDERGRROUND_LANGUAGE, WUNDERGROUND_COUNTRY, WUNDERGROUND_CITY);
-
-  drawProgress(display, 70, "Updating DHT Sensor");
+  drawProgress(display, 30, "Aggiornamento meteo...");
+  //wunderground.updateConditions(WUNDERGRROUND_API_KEY, WUNDERGRROUND_LANGUAGE, WUNDERGROUND_COUNTRY, WUNDERGROUND_CITY);
+  wunderground.updateConditionsPws(WUNDERGRROUND_API_KEY, WUNDERGRROUND_LANGUAGE, WUNDERGROUND_PWS);
+  drawProgress(display, 50, "Aggiornamento previsioni...");
+  //wunderground.updateForecast(WUNDERGRROUND_API_KEY, WUNDERGRROUND_LANGUAGE, WUNDERGROUND_COUNTRY, WUNDERGROUND_CITY);
+  wunderground.updateForecast(WUNDERGRROUND_API_KEY, WUNDERGRROUND_LANGUAGE, WUNDERGROUND_PWS);
+  drawProgress(display, 70, "Aggiornamento Hum DHT...");
   humidity = dht.readHumidity();
-  drawProgress(display, 80, "Updating DHT Sensor");
+  drawProgress(display, 80, "Aggiornamento Temp DHT...");
   temperature = dht.readTemperature(!IS_METRIC);
   delay(500);
   
-  drawProgress(display, 90, "Updating thingspeak...");
+  drawProgress(display, 90, "Fine aggiornamento...");
   thingspeak.getLastChannelItem(THINGSPEAK_CHANNEL_ID, THINGSPEAK_API_READ_KEY);
   readyForWeatherUpdate = false;
-  drawProgress(display, 100, "Done...");
+  drawProgress(display, 100, "Fatto...");
   delay(1000);
 }
 
@@ -393,6 +444,8 @@ void updateDHT() {
   humidity = dht.readHumidity();
   temperature = dht.readTemperature(!IS_METRIC);
   readyForDHTUpdate = false;
+ // MQTT
+  HomeKit();
 }
 
 
@@ -405,7 +458,9 @@ void drawDateTime(OLEDDisplay *display, OLEDDisplayUiState* state, int16_t x, in
   display->setTextAlignment(TEXT_ALIGN_CENTER);
   display->setFont(ArialMT_Plain_10);
   String date = ctime(&now);
-  date = date.substring(0,11) + String(1900+timeinfo->tm_year);
+  date = str_wday[timeinfo->tm_wday] + " " + String(timeinfo->tm_mday) + " " + str_mon[timeinfo->tm_mon] + " " + String(1900+timeinfo->tm_year);
+  //date = date.substring(0,4) + String(timeinfo->tm_mday) + date.substring(3,8) + String(1900+timeinfo->tm_year);
+  //date = date.substring(0,11) + String(1900+timeinfo->tm_year);
   int textWidth = display->getStringWidth(date);
   display->drawString(64 + x, 5 + y, date);
   display->setFont(DSEG7_Classic_Bold_21);
@@ -435,18 +490,18 @@ void drawDateTime(OLEDDisplay *display, OLEDDisplayUiState* state, int16_t x, in
 void drawCurrentWeather(OLEDDisplay *display, OLEDDisplayUiState* state, int16_t x, int16_t y) {
   display->setFont(ArialMT_Plain_10);
   display->setTextAlignment(TEXT_ALIGN_LEFT);
-  display->drawString(60 + x, 5 + y, wunderground.getWeatherText());
+  display->drawString(50 + x, 5 + y, wunderground.getWeatherText());
 
   display->setFont(ArialMT_Plain_24);
   String temp = wunderground.getCurrentTemp() + (IS_METRIC ? "°C": "°F");
   
-  display->drawString(60 + x, 15 + y, temp);
+  display->drawString(50 + x, 15 + y, temp);
   int tempWidth = display->getStringWidth(temp);
 
   display->setFont(Meteocons_Plain_42);
   String weatherIcon = wunderground.getTodayIcon();
   int weatherIconWidth = display->getStringWidth(weatherIcon);
-  display->drawString(32 + x - weatherIconWidth / 2, 05 + y, weatherIcon);
+  display->drawString(28 + x - weatherIconWidth / 2, 05 + y, weatherIcon);
 }
 
 
@@ -465,12 +520,12 @@ void drawForecast2(OLEDDisplay *display, OLEDDisplayUiState* state, int16_t x, i
 void drawIndoor(OLEDDisplay *display, OLEDDisplayUiState* state, int16_t x, int16_t y) {
   display->setTextAlignment(TEXT_ALIGN_CENTER);
   display->setFont(ArialMT_Plain_10);
-  display->drawString(64 + x, 0, "DHT22 Indoor Sensor");
+  display->drawString(64 + x, 0, "Sensore interno");
   display->setFont(ArialMT_Plain_16);
   dtostrf(temperature,4, 1, FormattedTemperature);
   display->drawString(64+x, 12, "Temp: " + String(FormattedTemperature) + (IS_METRIC ? "°C": "°F"));
   dtostrf(humidity,4, 1, FormattedHumidity);
-  display->drawString(64+x, 30, "Humidity: " + String(FormattedHumidity) + "%");
+  display->drawString(64+x, 30, "Hum: " + String(FormattedHumidity) + "%");
 
 }
 
@@ -495,7 +550,7 @@ void drawForecastDetails(OLEDDisplay *display, int x, int y, int dayIndex) {
   display->drawString(x + 20, y + 12, wunderground.getForecastIcon(dayIndex));
 
   display->setFont(ArialMT_Plain_10);
-  display->drawString(x + 20, y + 34, wunderground.getForecastLowTemp(dayIndex) + "|" + wunderground.getForecastHighTemp(dayIndex));
+  display->drawString(x + 20, y + 34, wunderground.getForecastLowTemp(dayIndex) + " - " + wunderground.getForecastHighTemp(dayIndex));
   display->setTextAlignment(TEXT_ALIGN_LEFT);
 }
 
@@ -562,4 +617,3 @@ void setReadyForDHTUpdate() {
   Serial.println("Setting readyForDHTUpdate to true");
   readyForDHTUpdate = true;
 }
-
